@@ -17,6 +17,7 @@
 package com.netflix.spinnaker.igor.jenkins
 
 import com.netflix.spinnaker.igor.IgorConfigurationProperties
+import com.netflix.spinnaker.igor.config.JenkinsProperties
 import com.netflix.spinnaker.igor.jenkins.client.model.ProjectsList
 import com.netflix.spinnaker.igor.jenkins.service.JenkinsService
 import com.netflix.spinnaker.igor.model.BuildServiceProvider
@@ -47,7 +48,8 @@ class JenkinsBuildMonitorSchedulingSpec extends Specification {
         BuildMasters buildMasters = Mock(BuildMasters)
         def cfg = new IgorConfigurationProperties()
         cfg.spinnaker.build.pollInterval = 1
-        monitor = new JenkinsBuildMonitor(cache: cache, buildMasters: buildMasters, igorConfigurationProperties: cfg)
+        def jenkinsConfig = new JenkinsProperties()
+        monitor = new JenkinsBuildMonitor(cache: cache, buildMasters: buildMasters, igorConfigurationProperties: cfg, jenkinsProperties: jenkinsConfig)
         monitor.worker = scheduler.createWorker()
 
         when:
@@ -81,6 +83,45 @@ class JenkinsBuildMonitorSchedulingSpec extends Specification {
         4 * buildMasters.filteredMap(BuildServiceProvider.JENKINS) >> [MASTER: jenkinsService]
         4 * buildMasters.map >> [MASTER: jenkinsService]
         4 * jenkinsService.projects >> PROJECTS
+
+        cleanup:
+        monitor.stop()
+    }
+
+    void 'scheduler can be turned off'() {
+        given:
+        cache.getJobNames(MASTER) >> []
+        BuildMasters buildMasters = Mock(BuildMasters)
+        def cfg = new IgorConfigurationProperties()
+        cfg.spinnaker.build.pollInterval = 1
+        def jenkinsConfig = new JenkinsProperties()
+        jenkinsConfig.polling.enabled = false
+        monitor = new JenkinsBuildMonitor(cache: cache, buildMasters: buildMasters, igorConfigurationProperties: cfg, jenkinsProperties: jenkinsConfig)
+        monitor.worker = scheduler.createWorker()
+
+        when:
+        monitor.onApplicationEvent(Mock(ContextRefreshedEvent))
+        scheduler.advanceTimeBy(1L, TimeUnit.SECONDS.MILLISECONDS)
+
+        then: 'initial poll'
+        0 * buildMasters.filteredMap(BuildServiceProvider.JENKINS) >> [MASTER: jenkinsService]
+        0 * buildMasters.map >> [MASTER: jenkinsService]
+        0 * jenkinsService.projects >> PROJECTS
+
+        when:
+        scheduler.advanceTimeBy(998L, TimeUnit.SECONDS.MILLISECONDS)
+
+        then:
+        0 * buildMasters.map >> [MASTER: jenkinsService]
+        0 * jenkinsService.projects >> PROJECTS
+
+        when: 'poll at 1 second'
+        scheduler.advanceTimeBy(2L, TimeUnit.SECONDS.MILLISECONDS)
+
+        then:
+        0 * buildMasters.filteredMap(BuildServiceProvider.JENKINS) >> [MASTER: jenkinsService]
+        0 * buildMasters.map >> [MASTER: jenkinsService]
+        0 * jenkinsService.projects >> PROJECTS
 
         cleanup:
         monitor.stop()

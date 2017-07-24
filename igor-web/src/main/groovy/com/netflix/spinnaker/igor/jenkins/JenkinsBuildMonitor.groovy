@@ -19,6 +19,7 @@ package com.netflix.spinnaker.igor.jenkins
 import com.netflix.appinfo.InstanceInfo
 import com.netflix.discovery.DiscoveryClient
 import com.netflix.spinnaker.igor.IgorConfigurationProperties
+import com.netflix.spinnaker.igor.config.JenkinsProperties
 import com.netflix.spinnaker.igor.history.EchoService
 import com.netflix.spinnaker.igor.history.model.BuildContent
 import com.netflix.spinnaker.igor.history.model.BuildEvent
@@ -76,6 +77,9 @@ class JenkinsBuildMonitor implements PollingMonitor {
     @Autowired
     IgorConfigurationProperties igorConfigurationProperties
 
+    @Autowired
+    JenkinsProperties jenkinsProperties
+
     @Override
     int getPollInterval() {
         igorConfigurationProperties.spinnaker.build.pollInterval
@@ -108,21 +112,23 @@ class JenkinsBuildMonitor implements PollingMonitor {
 
     @Override
     void onApplicationEvent(ContextRefreshedEvent event) {
-        log.info('Started')
-        worker.schedulePeriodically(
-                {
-                    if (isInService()) {
-                        log.info "- Polling cycle started - ${new Date()}"
-                        buildMasters.filteredMap(BuildServiceProvider.JENKINS).keySet().parallelStream().forEach(
-                                { master -> changedBuilds(master) }
-                        )
-                        log.info "- Polling cycle done - ${new Date()}"
-                    } else {
-                        log.info("not in service (lastPoll: ${lastPoll ?: 'n/a'})")
-                        lastPoll = null
-                    }
-                } as Action0, 0, pollInterval, TimeUnit.SECONDS
-        )
+        if (jenkinsProperties.polling.enabled) {
+            log.info('Jenkins Polling Starting')
+            worker.schedulePeriodically(
+              {
+                  if (isInService()) {
+                      log.info "- Polling cycle started - ${new Date()}"
+                      buildMasters.filteredMap(BuildServiceProvider.JENKINS).keySet().parallelStream().forEach(
+                        { master -> changedBuilds(master) }
+                      )
+                      log.info "- Polling cycle done - ${new Date()}"
+                  } else {
+                      log.info("not in service (lastPoll: ${lastPoll ?: 'n/a'})")
+                      lastPoll = null
+                  }
+              } as Action0, 0, pollInterval, TimeUnit.SECONDS
+            )
+        }
     }
 
     @PreDestroy
