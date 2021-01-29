@@ -16,6 +16,8 @@
 package com.netflix.spinnaker.igor.config;
 
 import com.jakewharton.retrofit.Ok3Client;
+import com.netflix.spinnaker.config.DefaultServiceEndpoint;
+import com.netflix.spinnaker.config.okhttp3.OkHttpClientProvider;
 import com.netflix.spinnaker.igor.keel.KeelService;
 import com.netflix.spinnaker.retrofit.Slf4jRetrofitLogger;
 import org.springframework.beans.factory.annotation.Value;
@@ -32,23 +34,22 @@ import retrofit.converter.JacksonConverter;
 public class KeelConfig {
 
   @Bean
-  public RestAdapter.LogLevel retrofitLogLevel(
-      @Value("${retrofit.log-level:BASIC}") String retrofitLogLevel) {
-    return RestAdapter.LogLevel.valueOf(retrofitLogLevel);
-  }
-
-  @Bean
   public Endpoint keelEndpoint(@Value("${services.keel.base-url}") String keelBaseUrl) {
     return Endpoints.newFixedEndpoint(keelBaseUrl);
   }
 
   @Bean
   public KeelService keelService(
-      Endpoint keelEndpoint, Ok3Client ok3Client, RestAdapter.LogLevel retrofitLogLevel) {
+      Endpoint keelEndpoint,
+      OkHttpClientProvider clientProvider,
+      RestAdapter.LogLevel retrofitLogLevel) {
     return new RestAdapter.Builder()
         .setEndpoint(keelEndpoint)
         .setConverter(new JacksonConverter())
-        .setClient(ok3Client)
+        .setClient(
+            new Ok3Client(
+                clientProvider.getClient(
+                    new DefaultServiceEndpoint("keel", keelEndpoint.getUrl()))))
         .setLogLevel(retrofitLogLevel)
         .setLog(new Slf4jRetrofitLogger(KeelService.class))
         .build()

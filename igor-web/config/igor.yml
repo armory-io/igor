@@ -1,3 +1,5 @@
+services.fiat.baseUrl: https://fiat.net
+
 netflix:
   appinfo:
     name: 'igor'
@@ -9,7 +11,7 @@ spinnaker:
     # A lower value can help prevent accidental re-triggers of pipelines, but may require hands-on operations if
     # set low.
     # See code documentation for more details. Class [PollingSafeguardProperties] in
-    # https://github.com/spinnaker/igor/blob/master/igor-web/src/main/groovy/com/netflix/spinnaker/igor/IgorConfigurationProperties.groovy#L47
+    # https://github.com/spinnaker/igor/blob/master/igor-core/src/main/java/com/netflix/spinnaker/igor/IgorConfigurationProperties.java#L92
     itemUpperThreshold: 1000
 
 endpoints.health.sensitive: false
@@ -17,6 +19,9 @@ endpoints.health.sensitive: false
 spring.jackson.serialization.write_dates_as_timestamps: false
 
 server.port: 8088
+
+redis:
+  connection: ${services.redis.baseUrl:redis://localhost:6379}
 
 #artifact:
 #  This is a feature toggle for decoration of artifacts.
@@ -44,9 +49,8 @@ server.port: 8088
 #      baseUrl: https://travis-ci.com
 #      address: https://api.travis-ci.com
 #      githubToken: XXXXXX
-#      numberOfRepositories: 25 # How many repositories the travis integration should fetch from the api each time the
-#                               # poller runs. Should be set a bit higher than the expected maximum number of
-#                               # repositories built within the poll interval.
+#      numberOfJobs: 100 # Defines how many jobs the Travis integration should retrieve per polling cycle.
+#                        # Defaults to 100.
 #
 #  Additional regexes to use when parsing build logs in search for uploaded
 #  artifacts, besides the default regexes which match on the output of the

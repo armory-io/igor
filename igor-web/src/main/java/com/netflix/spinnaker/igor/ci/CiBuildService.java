@@ -18,6 +18,7 @@ package com.netflix.spinnaker.igor.ci;
 
 import com.netflix.spinnaker.igor.build.model.GenericBuild;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Interface to be implemented by ci build service providers that supports a way of getting builds
@@ -32,8 +33,24 @@ public interface CiBuildService {
    *
    * @param projectKey the project key
    * @param repoSlug the repository name
+   * @param buildNumber the build number
+   * @param commitId the commit id
    * @param completionStatus filter builds based on status
    * @return a list of builds
    */
-  List<GenericBuild> getBuilds(String projectKey, String repoSlug, String completionStatus);
+  List<GenericBuild> getBuilds(
+      String projectKey,
+      String repoSlug,
+      String buildNumber,
+      String commitId,
+      String completionStatus);
+
+  /**
+   * Get the build log by providing the build id. The data returned will be used in the CI view, to
+   * present the build's log.
+   *
+   * @param buildId the build id
+   * @return a map with key "log" which represent the build log
+   */
+  Map<String, Object> getBuildOutput(String buildId);
 }

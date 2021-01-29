@@ -26,6 +26,9 @@ import com.netflix.spinnaker.igor.gitlabci.service.GitlabCiService
 import com.netflix.spinnaker.igor.history.EchoService
 import com.netflix.spinnaker.igor.polling.PollContext
 import com.netflix.spinnaker.igor.service.BuildServices
+import com.netflix.spinnaker.kork.discovery.DiscoveryStatusListener
+import com.netflix.spinnaker.kork.dynamicconfig.DynamicConfigService
+import org.springframework.scheduling.TaskScheduler
 import spock.lang.Ignore
 import spock.lang.Specification
 import spock.lang.Unroll
@@ -36,9 +39,9 @@ class GitlabCiBuildMonitorSpec extends Specification {
     EchoService echoService = Mock(EchoService)
     GitlabCiBuildMonitor buildMonitor
 
-    final String MASTER = "MASTER"
-    final int CACHED_JOB_TTL_SECONDS = 172800
-    final int CACHED_JOB_TTL_DAYS = 2
+    String MASTER = "MASTER"
+    int CACHED_JOB_TTL_SECONDS = 172800
+    int CACHED_JOB_TTL_DAYS = 2
 
     void setup() {
         def properties = new GitlabCiProperties(cachedJobTTLDays: CACHED_JOB_TTL_DAYS)
@@ -47,12 +50,14 @@ class GitlabCiBuildMonitorSpec extends Specification {
         buildMonitor = new GitlabCiBuildMonitor(
             new IgorConfigurationProperties(),
             new NoopRegistry(),
-            Optional.empty(),
+            new DynamicConfigService.NoopDynamicConfig(),
+            new DiscoveryStatusListener(true),
             Optional.empty(),
             buildCache,
             buildServices,
             properties,
-            Optional.of(echoService)
+            Optional.of(echoService),
+            Mock(TaskScheduler)
         )
     }
 

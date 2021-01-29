@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
 import com.fasterxml.jackson.module.jaxb.JaxbAnnotationModule
+import com.jakewharton.retrofit.Ok3Client
 import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.fiat.model.resources.Permissions
 import com.netflix.spinnaker.igor.IgorConfigurationProperties
@@ -30,10 +31,11 @@ import com.netflix.spinnaker.igor.config.client.JenkinsRetrofitRequestIntercepto
 import com.netflix.spinnaker.igor.jenkins.client.JenkinsClient
 import com.netflix.spinnaker.igor.jenkins.service.JenkinsService
 import com.netflix.spinnaker.igor.service.BuildServices
-import com.netflix.spinnaker.kork.telemetry.InstrumentedProxy
-import com.squareup.okhttp.OkHttpClient
+import com.netflix.spinnaker.retrofit.Slf4jRetrofitLogger
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
+import okhttp3.OkHttpClient
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.context.properties.EnableConfigurationProperties
@@ -42,7 +44,6 @@ import org.springframework.context.annotation.Configuration
 import retrofit.Endpoints
 import retrofit.RequestInterceptor
 import retrofit.RestAdapter
-import retrofit.client.OkClient
 import retrofit.converter.JacksonConverter
 
 import javax.net.ssl.KeyManager
@@ -69,8 +70,8 @@ class JenkinsConfig {
 
     @Bean
     @ConditionalOnMissingBean
-    JenkinsOkHttpClientProvider jenkinsOkHttpClientProvider() {
-        return new DefaultJenkinsOkHttpClientProvider()
+    JenkinsOkHttpClientProvider jenkinsOkHttpClientProvider(OkHttpClient okHttpClient) {
+        return new DefaultJenkinsOkHttpClientProvider(okHttpClient)
     }
 
     @Bean
@@ -85,24 +86,25 @@ class JenkinsConfig {
                                                @Valid JenkinsProperties jenkinsProperties,
                                                JenkinsOkHttpClientProvider jenkinsOkHttpClientProvider,
                                                JenkinsRetrofitRequestInterceptorProvider jenkinsRetrofitRequestInterceptorProvider,
-                                               Registry registry) {
+                                               Registry registry,
+                                               CircuitBreakerRegistry circuitBreakerRegistry,
+                                               RestAdapter.LogLevel retrofitLogLevel) {
         log.info "creating jenkinsMasters"
         Map<String, JenkinsService> jenkinsMasters = jenkinsProperties?.masters?.collectEntries { JenkinsProperties.JenkinsHost host ->
             log.info "bootstrapping ${host.address} as ${host.name}"
             [(host.name): jenkinsService(
                 host.name,
-                (JenkinsClient) InstrumentedProxy.proxy(
+                jenkinsClient(
+                    host,
+                    jenkinsOkHttpClientProvider.provide(host),
+                    jenkinsRetrofitRequestInterceptorProvider.provide(host),
                     registry,
-                    jenkinsClient(
-                        host,
-                        jenkinsOkHttpClientProvider.provide(host),
-                        jenkinsRetrofitRequestInterceptorProvider.provide(host),
-                        igorConfigurationProperties.client.timeout
-                    ),
-                    "jenkinsClient",
-                    [master: host.name]),
+                    retrofitLogLevel,
+                    igorConfigurationProperties.client.timeout
+                ),
                 host.csrf,
-                host.permissions.build()
+                host.permissions.build(),
+                circuitBreakerRegistry
             )]
         }
 
@@ -110,8 +112,14 @@ class JenkinsConfig {
         jenkinsMasters
     }
 
-    static JenkinsService jenkinsService(String jenkinsHostId, JenkinsClient jenkinsClient, Boolean csrf, Permissions permissions) {
-        return new JenkinsService(jenkinsHostId, jenkinsClient, csrf, permissions)
+    static JenkinsService jenkinsService(
+      String jenkinsHostId,
+      JenkinsClient jenkinsClient,
+      Boolean csrf,
+      Permissions permissions,
+      CircuitBreakerRegistry circuitBreakerRegistry
+    ) {
+        return new JenkinsService(jenkinsHostId, jenkinsClient, csrf, permissions, circuitBreakerRegistry)
     }
 
     static ObjectMapper getObjectMapper() {
@@ -123,13 +131,16 @@ class JenkinsConfig {
     static JenkinsClient jenkinsClient(JenkinsProperties.JenkinsHost host,
                                        OkHttpClient client,
                                        RequestInterceptor requestInterceptor,
+                                       Registry registry,
+                                       RestAdapter.LogLevel retrofitLogLevel,
                                        int timeout = 30000) {
-        client.setReadTimeout(timeout, TimeUnit.MILLISECONDS)
+
+        OkHttpClient.Builder clientBuilder = client.newBuilder().readTimeout(timeout, TimeUnit.MILLISECONDS)
 
         if (host.skipHostnameVerification) {
-            client.setHostnameVerifier({ hostname, _ ->
-                true
-            })
+          clientBuilder.hostnameVerifier({ hostname, _ ->
+            true
+          })
         }
 
         TrustManager[] trustManagers = null
@@ -139,15 +150,7 @@ class JenkinsConfig {
             if (host.trustStore.equals("*")) {
                 trustManagers = [new TrustAllTrustManager()]
             } else {
-                def trustStorePassword = host.trustStorePassword
-                def trustStore = KeyStore.getInstance(host.trustStoreType)
-                new File(host.trustStore).withInputStream {
-                    trustStore.load(it, trustStorePassword.toCharArray())
-                }
-                def trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
-                trustManagerFactory.init(trustStore)
-
-                trustManagers = trustManagerFactory.trustManagers
+                trustManagers = createTrustStore(host.trustStore, host.trustStorePassword, host.trustStoreType)
             }
         }
 
@@ -161,13 +164,19 @@ class JenkinsConfig {
             keyManagerFactory.init(keyStore, keyStorePassword.toCharArray())
 
             keyManagers = keyManagerFactory.keyManagers
+
+            if (trustManagers == null) {
+                log.warn("${host.name}: okhttp3 (unlike okhttp2) doesn't support configuring only a keystore without " +
+                        "a truststore. Please configure a truststore to get rid of this message. Trying to use the " +
+                        "keystore '${host.keyStore}' as a truststore as well. Your mileage may vary.")
+                trustManagers = createTrustStore(host.keyStore, host.keyStorePassword, host.keyStoreType)
+            }
         }
 
         if (trustManagers || keyManagers) {
             def sslContext = SSLContext.getInstance("TLS")
             sslContext.init(keyManagers, trustManagers, null)
-
-            client.setSslSocketFactory(sslContext.socketFactory)
+            clientBuilder.sslSocketFactory(sslContext.socketFactory, (X509TrustManager) trustManagers[0])
         }
 
         new RestAdapter.Builder()
@@ -179,15 +188,29 @@ class JenkinsConfig {
                     requestInterceptor.intercept(request)
                 }
             })
-            .setClient(new OkClient(client))
+            .setLogLevel(retrofitLogLevel)
+            .setClient(new Ok3Client(clientBuilder.build()))
             .setConverter(new JacksonConverter(getObjectMapper()))
+            .setLog(new Slf4jRetrofitLogger(JenkinsClient))
             .build()
             .create(JenkinsClient)
     }
+    private static TrustManager[] createTrustStore(String trustStoreName,
+                                                   String trustStorePassword,
+                                                   String trustStoreType) {
+        def trustStore = KeyStore.getInstance(trustStoreType)
+        new File(trustStoreName).withInputStream {
+            trustStore.load(it, trustStorePassword.toCharArray())
+        }
+        def trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+        trustManagerFactory.init(trustStore)
 
-    static JenkinsClient jenkinsClient(JenkinsProperties.JenkinsHost host, int timeout = 30000) {
+        return trustManagerFactory.trustManagers
+    }
+
+    static JenkinsClient jenkinsClient(JenkinsProperties.JenkinsHost host, Registry registry = null, RestAdapter.LogLevel retrofitLogLevel = RestAdapter.LogLevel.BASIC, int timeout = 30000) {
         OkHttpClient client = new OkHttpClient()
-        jenkinsClient(host, client, RequestInterceptor.NONE, timeout)
+        jenkinsClient(host, client, RequestInterceptor.NONE, registry, retrofitLogLevel, timeout)
     }
 
     static class TrustAllTrustManager implements X509TrustManager {

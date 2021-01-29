@@ -17,8 +17,8 @@
 package com.netflix.spinnaker.igor.artifactory;
 
 import static java.util.Collections.emptyList;
+import static org.jfrog.artifactory.client.aql.AqlItem.aqlItem;
 
-import com.netflix.discovery.DiscoveryClient;
 import com.netflix.spectator.api.Registry;
 import com.netflix.spinnaker.igor.IgorConfigurationProperties;
 import com.netflix.spinnaker.igor.artifactory.model.ArtifactoryItem;
@@ -33,9 +33,13 @@ import com.netflix.spinnaker.igor.polling.LockService;
 import com.netflix.spinnaker.igor.polling.PollContext;
 import com.netflix.spinnaker.igor.polling.PollingDelta;
 import com.netflix.spinnaker.kork.artifacts.model.Artifact;
+import com.netflix.spinnaker.kork.discovery.DiscoveryStatusListener;
+import com.netflix.spinnaker.kork.dynamicconfig.DynamicConfigService;
 import com.netflix.spinnaker.security.AuthenticatedRequest;
 import java.io.IOException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -46,8 +50,11 @@ import org.jfrog.artifactory.client.Artifactory;
 import org.jfrog.artifactory.client.ArtifactoryClientBuilder;
 import org.jfrog.artifactory.client.ArtifactoryRequest;
 import org.jfrog.artifactory.client.ArtifactoryResponse;
+import org.jfrog.artifactory.client.aql.AqlItem;
+import org.jfrog.artifactory.client.aql.AqlQueryBuilder;
 import org.jfrog.artifactory.client.impl.ArtifactoryRequestImpl;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -63,12 +70,20 @@ public class ArtifactoryBuildMonitor
   public ArtifactoryBuildMonitor(
       IgorConfigurationProperties properties,
       Registry registry,
-      Optional<DiscoveryClient> discoveryClient,
+      DynamicConfigService dynamicConfigService,
+      DiscoveryStatusListener discoveryStatusListener,
       Optional<LockService> lockService,
       Optional<EchoService> echoService,
       ArtifactoryCache cache,
-      ArtifactoryProperties artifactoryProperties) {
-    super(properties, registry, discoveryClient, lockService);
+      ArtifactoryProperties artifactoryProperties,
+      TaskScheduler scheduler) {
+    super(
+        properties,
+        registry,
+        dynamicConfigService,
+        discoveryStatusListener,
+        lockService,
+        scheduler);
     this.cache = cache;
     this.artifactoryProperties = artifactoryProperties;
     this.echoService = echoService;
@@ -107,7 +122,7 @@ public class ArtifactoryBuildMonitor
               long lookbackFromCurrent =
                   System.currentTimeMillis()
                       - (getPollInterval() * 1000 + (lookBackWindowMins * 60 * 1000));
-              String modified = "\"modified\":{\"$last\":\"" + lookBackWindowMins + "minutes\"}";
+              AqlItem modified = aqlItem("$last", lookBackWindowMins + "minutes");
 
               Long cursor = cache.getLastPollCycleTimestamp(search);
               if (cursor == null) {
@@ -119,26 +134,27 @@ public class ArtifactoryBuildMonitor
                       .getSpinnaker()
                       .getBuild()
                       .isProcessBuildsOlderThanLookBackWindow()) {
-                modified = "\"modified\":{\"$gt\":\"" + Instant.ofEpochMilli(cursor) + "\"}";
+                modified = aqlItem("$gt", Instant.ofEpochMilli(cursor).toString());
               }
               cache.setLastPollCycleTimestamp(search, System.currentTimeMillis());
 
-              String aqlQuery =
-                  "items.find({"
-                      + "\"repo\":\""
-                      + search.getRepo()
-                      + "\","
-                      + modified
-                      + ","
-                      + "\"path\":{\"$match\":\""
-                      + (search.getGroupId() == null
-                          ? ""
-                          : search.getGroupId().replace('.', '/') + "/")
-                      + "*\"},"
-                      + "\"name\": {\"$match\":\"*"
-                      + search.getArtifactExtension()
-                      + "\"}"
-                      + "}).include(\"path\",\"repo\",\"name\", \"artifact.module.build\")";
+              String pathMatch =
+                  search.getGroupId() == null ? "" : search.getGroupId().replace('.', '/') + "/";
+
+              List<String> includes =
+                  new ArrayList<>(Arrays.asList("path", "repo", "name", "artifact.module.build"));
+              if (ArtifactoryRepositoryType.HELM.equals(search.getRepoType())) {
+                includes.add("@chart.name");
+                includes.add("@chart.version");
+              }
+
+              AqlQueryBuilder aqlQueryBuilder =
+                  new AqlQueryBuilder()
+                      .item(aqlItem("repo", search.getRepo()))
+                      .item(aqlItem("modified", modified))
+                      .item(aqlItem("path", aqlItem("$match", pathMatch + "*")))
+                      .item(aqlItem("name", aqlItem("$match", "*" + search.getArtifactExtension())))
+                      .include(includes.toArray(new String[0]));
 
               ArtifactoryRequest aqlRequest =
                   new ArtifactoryRequestImpl()
@@ -146,7 +162,7 @@ public class ArtifactoryBuildMonitor
                       .apiUrl("api/search/aql")
                       .requestType(ArtifactoryRequest.ContentType.TEXT)
                       .responseType(ArtifactoryRequest.ContentType.JSON)
-                      .requestBody(aqlQuery);
+                      .requestBody(aqlQueryBuilder.build());
 
               try {
                 ArtifactoryResponse aqlResponse = client.restCall(aqlRequest);
@@ -191,11 +207,7 @@ public class ArtifactoryBuildMonitor
   private void postEvent(Artifact artifact, String name) {
     if (!echoService.isPresent()) {
       log.warn("Cannot send build notification: Echo is not configured");
-      registry
-          .counter(
-              missedNotificationId.withTag(
-                  "monitor", ArtifactoryBuildMonitor.class.getSimpleName()))
-          .increment();
+      registry.counter(missedNotificationId.withTag("monitor", getName())).increment();
     } else {
       if (artifact != null) {
         AuthenticatedRequest.allowAnonymous(

@@ -8,13 +8,15 @@
  */
 package com.netflix.spinnaker.igor.wercker
 
+import com.netflix.spinnaker.kork.discovery.DiscoveryStatusListener
+import com.netflix.spinnaker.kork.dynamicconfig.DynamicConfigService
 import com.netflix.spinnaker.security.AuthenticatedRequest
+import org.springframework.scheduling.TaskScheduler
 
 import static com.netflix.spinnaker.igor.wercker.model.Run.finishedAtComparator
 import static com.netflix.spinnaker.igor.wercker.model.Run.startedAtComparator
 import static net.logstash.logback.argument.StructuredArguments.kv
 
-import com.netflix.discovery.DiscoveryClient
 import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.igor.IgorConfigurationProperties
 import com.netflix.spinnaker.igor.build.model.GenericBuild
@@ -61,16 +63,18 @@ class WerckerBuildMonitor extends CommonPollingMonitor<PipelineDelta, PipelinePo
 
     @Autowired
     WerckerBuildMonitor(
-        IgorConfigurationProperties properties,
-        Registry registry,
-        Optional<DiscoveryClient> discoveryClient,
-        Optional<LockService> lockService,
-        WerckerCache cache,
-        BuildServices buildServices,
-        @Value('${wercker.polling.enabled:true}') boolean pollingEnabled,
-        Optional<EchoService> echoService,
-        WerckerProperties werckerProperties) {
-        super(properties, registry, discoveryClient, lockService)
+      IgorConfigurationProperties properties,
+      Registry registry,
+      DynamicConfigService dynamicConfigService,
+      DiscoveryStatusListener discoveryStatusListener,
+      Optional < LockService > lockService,
+      WerckerCache cache,
+      BuildServices buildServices,
+      @Value('${wercker.polling.enabled:true}') boolean pollingEnabled,
+      Optional<EchoService> echoService,
+      WerckerProperties werckerProperties,
+      TaskScheduler scheduler) {
+        super(properties, registry, dynamicConfigService, discoveryStatusListener, lockService, scheduler)
         this.cache = cache
         this.buildServices = buildServices
         this.pollingEnabled = pollingEnabled
@@ -97,14 +101,6 @@ class WerckerBuildMonitor extends CommonPollingMonitor<PipelineDelta, PipelinePo
         }
         )
         log.info "WerckerBuildMonitor Polling cycle done in ${System.currentTimeMillis() - startTime}ms"
-    }
-
-    @PreDestroy
-    void stop() {
-        log.info('Stopped')
-        if (!worker.isUnsubscribed()) {
-            worker.unsubscribe()
-        }
     }
 
     /**
@@ -258,7 +254,7 @@ class WerckerBuildMonitor extends CommonPollingMonitor<PipelineDelta, PipelinePo
     private boolean postEvent(GenericProject project, String master) {
         if (!echoService.isPresent()) {
             log.warn("Cannot send build notification: Echo is not configured")
-            registry.counter(missedNotificationId.withTag("monitor", getClass().simpleName)).increment()
+            registry.counter(missedNotificationId.withTag("monitor", getName())).increment()
             return false
         }
         AuthenticatedRequest.allowAnonymous {

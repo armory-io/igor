@@ -16,7 +16,9 @@
 
 package com.netflix.spinnaker.igor.config
 
-import com.netflix.spinnaker.config.OkHttpClientConfiguration
+import com.jakewharton.retrofit.Ok3Client
+import com.netflix.spinnaker.config.DefaultServiceEndpoint
+import com.netflix.spinnaker.config.okhttp3.OkHttpClientProvider
 import com.netflix.spinnaker.igor.IgorConfigurationProperties
 import com.netflix.spinnaker.igor.docker.model.DockerRegistryAccounts
 import com.netflix.spinnaker.igor.docker.service.ClouddriverService
@@ -28,8 +30,6 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import retrofit.Endpoints
 import retrofit.RestAdapter
-import retrofit.client.OkClient
-
 
 @Configuration
 @ConditionalOnProperty(['services.clouddriver.base-url', 'docker-registry.enabled'])
@@ -42,18 +42,18 @@ class DockerRegistryConfig {
     }
 
     @Bean
-    ClouddriverService dockerRegistryProxyService(OkHttpClientConfiguration okHttpClientConfig, IgorConfigurationProperties igorConfigurationProperties) {
+    ClouddriverService dockerRegistryProxyService(OkHttpClientProvider clientProvider,
+                                                  IgorConfigurationProperties igorConfigurationProperties,
+                                                  RestAdapter.LogLevel retrofitLogLevel) {
         def address = igorConfigurationProperties.services.clouddriver.baseUrl ?: 'none'
         if (address == 'none') {
             null
         }
 
-        def cli = okHttpClientConfig.create()
-
         new RestAdapter.Builder()
                 .setEndpoint(Endpoints.newFixedEndpoint(address))
-                .setClient(new OkClient(cli))
-                .setLogLevel(RestAdapter.LogLevel.BASIC)
+                .setClient(new Ok3Client(clientProvider.getClient(new DefaultServiceEndpoint("clouddriver", address))))
+                .setLogLevel(retrofitLogLevel)
                 .setLog(new Slf4jRetrofitLogger(ClouddriverService))
                 .build()
                 .create(ClouddriverService)

@@ -16,7 +16,6 @@
 
 package com.netflix.spinnaker.igor.jenkins
 
-import com.netflix.discovery.DiscoveryClient
 import com.netflix.spectator.api.BasicTag
 import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.igor.IgorConfigurationProperties
@@ -34,11 +33,14 @@ import com.netflix.spinnaker.igor.polling.LockService
 import com.netflix.spinnaker.igor.polling.PollContext
 import com.netflix.spinnaker.igor.polling.PollingDelta
 import com.netflix.spinnaker.igor.service.BuildServices
+import com.netflix.spinnaker.kork.discovery.DiscoveryStatusListener
+import com.netflix.spinnaker.kork.dynamicconfig.DynamicConfigService
 import com.netflix.spinnaker.security.AuthenticatedRequest
 import groovy.time.TimeCategory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import org.springframework.scheduling.TaskScheduler
 import org.springframework.stereotype.Service
 import retrofit.RetrofitError
 import java.util.stream.Collectors
@@ -61,14 +63,16 @@ class JenkinsBuildMonitor extends CommonPollingMonitor<JobDelta, JobPollingDelta
     @Autowired
     JenkinsBuildMonitor(IgorConfigurationProperties properties,
                         Registry registry,
-                        Optional<DiscoveryClient> discoveryClient,
-                        Optional<LockService> lockService,
+                        DynamicConfigService dynamicConfigService,
+                        DiscoveryStatusListener discoveryStatusListener,
+                        Optional < LockService > lockService,
                         JenkinsCache cache,
                         BuildServices buildServices,
                         @Value('${jenkins.polling.enabled:true}') boolean pollingEnabled,
                         Optional<EchoService> echoService,
-                        JenkinsProperties jenkinsProperties) {
-        super(properties, registry, discoveryClient, lockService)
+                        JenkinsProperties jenkinsProperties,
+                        TaskScheduler scheduler) {
+        super(properties, registry, dynamicConfigService, discoveryStatusListener, lockService, scheduler)
         this.cache = cache
         this.buildServices = buildServices
         this.pollingEnabled = pollingEnabled
@@ -198,8 +202,11 @@ class JenkinsBuildMonitor extends CommonPollingMonitor<JobDelta, JobPollingDelta
                     if (sendEvents) {
                         postEvent(new Project(name: job.name, lastBuild: build), master)
                         log.debug("[${master}:${job.name}]:${build.number} event posted")
-                        cache.setEventPosted(master, job.name, job.cursor, build.number)
+                    } else {
+                      registry.counter(missedNotificationId.withTags("monitor", getName(), "reason", "fastForward")).increment()
                     }
+
+                    cache.setEventPosted(master, job.name, job.cursor, build.number)
                 }
             }
 
@@ -221,7 +228,7 @@ class JenkinsBuildMonitor extends CommonPollingMonitor<JobDelta, JobPollingDelta
     private void postEvent(Project project, String master) {
         if (!echoService.isPresent()) {
             log.warn("Cannot send build notification: Echo is not configured")
-            registry.counter(missedNotificationId.withTag("monitor", getClass().simpleName)).increment()
+            registry.counter(missedNotificationId.withTag("monitor", getName())).increment()
             return
         }
         AuthenticatedRequest.allowAnonymous {

@@ -1,8 +1,8 @@
 ext {
-  springConfigLocation = System.getProperty('spring.config.additional-location', "${System.getProperty('user.home')}/.spinnaker/")
+  springConfigLocation = System.getProperty('spring.config.additional-location', "${System.getProperty('user.home')}/.spinnaker/".toString())
 }
 
-apply plugin: 'spinnaker.application'
+apply plugin: 'io.spinnaker.package'
 
 run {
   systemProperty('spring.config.additional-location', project.springConfigLocation)
@@ -18,6 +18,8 @@ test {
 dependencies {
     implementation project(":igor-core")
     implementation project(":igor-monitor-artifactory")
+    implementation project(":igor-monitor-plugins")
+    implementation project(":igor-monitor-travis")
 
     implementation platform("com.netflix.spinnaker.kork:kork-bom:$korkVersion")
     compileOnly "org.projectlombok:lombok"
@@ -26,13 +28,16 @@ dependencies {
     testAnnotationProcessor platform("com.netflix.spinnaker.kork:kork-bom:$korkVersion")
     testAnnotationProcessor "org.projectlombok:lombok"
 
-    implementation "org.springframework.boot:spring-boot-properties-migrator"
+    runtimeOnly "org.springframework.boot:spring-boot-properties-migrator"
     implementation "org.springframework.boot:spring-boot-starter-actuator"
     implementation "org.springframework.boot:spring-boot-starter-web"
 
     implementation "javax.xml.bind:jaxb-api"
     implementation "com.sun.xml.bind:jaxb-core:2.3.0.1"
     implementation "com.sun.xml.bind:jaxb-impl:2.3.2"
+
+    implementation "com.vdurmont:semver4j"
+    implementation "commons-io:commons-io"
 
     testImplementation "org.springframework.boot:spring-boot-starter-test"
     testImplementation "org.spockframework:spock-core"
@@ -46,7 +51,6 @@ dependencies {
     implementation "com.fasterxml.jackson.core:jackson-annotations"
     implementation "com.fasterxml.jackson.core:jackson-core"
     implementation "com.fasterxml.jackson.core:jackson-databind"
-    implementation "com.fasterxml.jackson.datatype:jackson-datatype-jsr310"
     implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-xml"
     implementation("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml")
 
@@ -56,37 +60,36 @@ dependencies {
     implementation "com.squareup.okhttp:okhttp-urlconnection"
     implementation "com.squareup.okhttp:okhttp-apache"
     implementation "com.squareup.okhttp3:okhttp-sse"
-    implementation "com.squareup.retrofit:converter-simplexml"
     implementation "com.jakewharton.retrofit:retrofit1-okhttp3-client:1.1.0"
-
     implementation "com.netflix.spinnaker.fiat:fiat-api:$fiatVersion"
     implementation "com.netflix.spinnaker.fiat:fiat-core:$fiatVersion"
     implementation "org.springframework.security:spring-security-core"
     implementation "org.springframework.security:spring-security-config"
     implementation "org.springframework.security:spring-security-web"
+    implementation "org.springframework.cloud:spring-cloud-context"
+    implementation "org.springframework.cloud:spring-cloud-config-server"
 
     implementation "com.amazonaws:aws-java-sdk"
     implementation "com.google.apis:google-api-services-cloudbuild"
     implementation "com.google.apis:google-api-services-storage"
     implementation 'com.google.auth:google-auth-library-oauth2-http'
     implementation "com.netflix.spinnaker.kork:kork-config"
-    implementation "com.netflix.spinnaker.kork:kork-core"
+    implementation "com.netflix.spinnaker.kork:kork-cloud-config-server"
     implementation "com.netflix.spinnaker.kork:kork-artifacts"
-    implementation "com.netflix.spinnaker.kork:kork-stackdriver"
+    implementation "com.netflix.spinnaker.kork:kork-exceptions"
     implementation "com.netflix.spinnaker.kork:kork-web"
     implementation "com.netflix.spinnaker.kork:kork-jedis"
-    implementation "com.netflix.spinnaker.kork:kork-dynomite"
     implementation "com.netflix.spinnaker.kork:kork-telemetry"
-    implementation "com.netflix.spinnaker.kork:kork-hystrix"
-    implementation "com.netflix.spinnaker.kork:kork-secrets-aws"
-    implementation "com.netflix.spinnaker.kork:kork-secrets-gcp"
+    implementation "com.netflix.spinnaker.kork:kork-plugins"
 
-    implementation "io.reactivex:rxjava"
-    implementation "com.netflix.eureka:eureka-client"
     implementation "io.github.resilience4j:resilience4j-retry"
 
     implementation "io.projectreactor:reactor-core"
     implementation "com.google.code.gson:gson"
+    implementation "com.google.guava:guava"
+    implementation "javax.inject:javax.inject:1"
+
+    runtimeOnly "com.netflix.spinnaker.kork:kork-runtime"
 
     testImplementation "com.squareup.okhttp:mockwebserver"
     testImplementation "com.netflix.spinnaker.kork:kork-jedis-test"

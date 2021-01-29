@@ -22,9 +22,9 @@ import static org.springframework.http.HttpStatus.NOT_FOUND;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.netflix.spinnaker.fiat.model.resources.Permissions;
-import com.netflix.spinnaker.hystrix.SimpleJava8HystrixCommand;
 import com.netflix.spinnaker.igor.build.model.GenericBuild;
 import com.netflix.spinnaker.igor.build.model.GenericGitRevision;
+import com.netflix.spinnaker.igor.build.model.UpdatedBuild;
 import com.netflix.spinnaker.igor.exceptions.ArtifactNotFoundException;
 import com.netflix.spinnaker.igor.exceptions.BuildJobError;
 import com.netflix.spinnaker.igor.exceptions.QueuedJobDeterminationError;
@@ -45,6 +45,10 @@ import com.netflix.spinnaker.igor.service.BuildProperties;
 import com.netflix.spinnaker.kork.core.RetrySupport;
 import com.netflix.spinnaker.kork.exceptions.SpinnakerException;
 import com.netflix.spinnaker.kork.web.exceptions.NotFoundException;
+import com.netflix.spinnaker.security.AuthenticatedRequest;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import java.io.InputStream;
 import java.time.Duration;
 import java.util.HashMap;
@@ -65,20 +69,37 @@ import retrofit.client.Response;
 @Slf4j
 public class JenkinsService implements BuildOperations, BuildProperties {
   private final ObjectMapper objectMapper = new ObjectMapper();
-  private final String groupKey;
   private final String serviceName;
   private final JenkinsClient jenkinsClient;
   private final Boolean csrf;
   private final RetrySupport retrySupport = new RetrySupport();
   private final Permissions permissions;
+  private final CircuitBreaker circuitBreaker;
 
   public JenkinsService(
-      String jenkinsHostId, JenkinsClient jenkinsClient, Boolean csrf, Permissions permissions) {
+      String jenkinsHostId,
+      JenkinsClient jenkinsClient,
+      Boolean csrf,
+      Permissions permissions,
+      CircuitBreakerRegistry circuitBreakerRegistry) {
     this.serviceName = jenkinsHostId;
-    this.groupKey = "jenkins-" + jenkinsHostId;
     this.jenkinsClient = jenkinsClient;
     this.csrf = csrf;
     this.permissions = permissions;
+    this.circuitBreaker =
+        circuitBreakerRegistry.circuitBreaker(
+            "jenkins-" + jenkinsHostId,
+            CircuitBreakerConfig.custom()
+                .ignoreException(
+                    (e) -> {
+                      if (e instanceof RetrofitError) {
+                        RetrofitError re = (RetrofitError) e;
+                        return re.getKind() == RetrofitError.Kind.HTTP
+                            && re.getResponse().getStatus() == 404;
+                      }
+                      return false;
+                    })
+                .build());
   }
 
   @Override
@@ -91,21 +112,21 @@ public class JenkinsService implements BuildOperations, BuildProperties {
   }
 
   public ProjectsList getProjects() {
-    ProjectsList projectsList =
-        new SimpleJava8HystrixCommand<>(
-                groupKey, buildCommandKey("getProjects"), jenkinsClient::getProjects)
-            .execute();
-
-    if (projectsList == null || projectsList.getList() == null) {
-      return new ProjectsList();
-    }
-    List<Project> projects =
-        projectsList.getList().stream()
-            .flatMap(this::recursiveGetProjects)
-            .collect(Collectors.toList());
-    ProjectsList projectList = new ProjectsList();
-    projectList.setList(projects);
-    return projectList;
+    return circuitBreaker.executeSupplier(
+        () -> {
+          ProjectsList projectsList =
+              AuthenticatedRequest.allowAnonymous(() -> jenkinsClient.getProjects());
+          if (projectsList == null || projectsList.getList() == null) {
+            return new ProjectsList();
+          }
+          List<Project> projects =
+              projectsList.getList().stream()
+                  .flatMap(this::recursiveGetProjects)
+                  .collect(Collectors.toList());
+          ProjectsList projectList = new ProjectsList();
+          projectList.setList(projects);
+          return projectList;
+        });
   }
 
   private Stream<Project> recursiveGetProjects(Project project) {
@@ -122,43 +143,38 @@ public class JenkinsService implements BuildOperations, BuildProperties {
   }
 
   public JobList getJobs() {
-    return new SimpleJava8HystrixCommand<>(
-            groupKey, buildCommandKey("getJobs"), jenkinsClient::getJobs)
-        .execute();
+    return circuitBreaker.executeSupplier(jenkinsClient::getJobs);
   }
 
   public String getCrumb() {
     if (csrf) {
-      Crumb crumb =
-          new SimpleJava8HystrixCommand<>(
-                  groupKey, buildCommandKey("getCrumb"), jenkinsClient::getCrumb)
-              .execute();
-      if (crumb != null) {
-        return crumb.getCrumb();
-      }
+      return circuitBreaker.executeSupplier(
+          () -> {
+            Crumb crumb = jenkinsClient.getCrumb();
+            if (crumb != null) {
+              return crumb.getCrumb();
+            }
+            return null;
+          });
     }
     return null;
   }
 
   @Override
   public List<Build> getBuilds(String jobName) {
-    return new SimpleJava8HystrixCommand<>(
-            groupKey,
-            buildCommandKey("getBuildList"),
-            () -> jenkinsClient.getBuilds(encode(jobName)).getList())
-        .execute();
+    return circuitBreaker.executeSupplier(
+        () ->
+            AuthenticatedRequest.allowAnonymous(() -> jenkinsClient.getBuilds(encode(jobName)))
+                .getList());
   }
 
   public BuildDependencies getDependencies(String jobName) {
-    return new SimpleJava8HystrixCommand<>(
-            groupKey,
-            buildCommandKey("getDependencies"),
-            () -> jenkinsClient.getDependencies(encode(jobName)))
-        .execute();
+    return circuitBreaker.executeSupplier(() -> jenkinsClient.getDependencies(encode(jobName)));
   }
 
   public Build getBuild(String jobName, Integer buildNumber) {
-    return jenkinsClient.getBuild(encode(jobName), buildNumber);
+    return circuitBreaker.executeSupplier(
+        () -> jenkinsClient.getBuild(encode(jobName), buildNumber));
   }
 
   @Override
@@ -196,64 +212,66 @@ public class JenkinsService implements BuildOperations, BuildProperties {
 
   private ScmDetails getGitDetails(String jobName, Integer buildNumber) {
     return retrySupport.retry(
-        () ->
-            new SimpleJava8HystrixCommand<>(
-                    groupKey,
-                    buildCommandKey("getGitDetails"),
-                    () -> {
-                      try {
-                        return jenkinsClient.getGitDetails(encode(jobName), buildNumber);
-                      } catch (RetrofitError e) {
-                        // assuming that a conversion error is unlikely to succeed on retry
-                        if (e.getKind() == RetrofitError.Kind.CONVERSION) {
-                          log.warn(
-                              "Unable to deserialize git details for build "
-                                  + buildNumber
-                                  + " of "
-                                  + jobName,
-                              e);
-                          return null;
-                        } else {
-                          throw e;
-                        }
-                      }
-                    })
-                .execute(),
+        () -> {
+          try {
+            return jenkinsClient.getGitDetails(encode(jobName), buildNumber);
+          } catch (RetrofitError e) {
+            // assuming that a conversion error is unlikely to succeed on retry
+            if (e.getKind() == RetrofitError.Kind.CONVERSION) {
+              log.warn(
+                  "Unable to deserialize git details for build " + buildNumber + " of " + jobName,
+                  e);
+              return null;
+            } else {
+              throw e;
+            }
+          }
+        },
         10,
         1000,
         false);
   }
 
   public Build getLatestBuild(String jobName) {
-    return new SimpleJava8HystrixCommand<>(
-            groupKey,
-            buildCommandKey("getLatestBuild"),
-            () -> jenkinsClient.getLatestBuild(encode(jobName)))
-        .execute();
+    return circuitBreaker.executeSupplier(() -> jenkinsClient.getLatestBuild(encode(jobName)));
   }
 
-  public QueuedJob queuedBuild(Integer item) {
+  @Override
+  public QueuedJob queuedBuild(String master, int item) {
     try {
-      return jenkinsClient.getQueuedItem(item);
+      return circuitBreaker.executeSupplier(() -> jenkinsClient.getQueuedItem(item));
     } catch (RetrofitError e) {
       if (e.getResponse() != null && e.getResponse().getStatus() == NOT_FOUND.value()) {
-        throw new NotFoundException("Queued job '${item}' not found for master '${master}'.");
+        throw new NotFoundException(
+            String.format("Queued job '%s' not found for master '%s'.", item, master));
       }
       throw e;
     }
   }
 
   public Response build(String jobName) {
-    return jenkinsClient.build(encode(jobName), "", getCrumb());
+    return circuitBreaker.executeSupplier(
+        () -> jenkinsClient.build(encode(jobName), "", getCrumb()));
   }
 
   public Response buildWithParameters(String jobName, Map<String, String> queryParams) {
-    return jenkinsClient.buildWithParameters(encode(jobName), queryParams, "", getCrumb());
+    return circuitBreaker.executeSupplier(
+        () -> jenkinsClient.buildWithParameters(encode(jobName), queryParams, "", getCrumb()));
+  }
+
+  @Override
+  public void updateBuild(String jobName, Integer buildNumber, UpdatedBuild updatedBuild) {
+    if (updatedBuild.getDescription() != null) {
+      circuitBreaker.executeRunnable(
+          () ->
+              jenkinsClient.submitDescription(
+                  encode(jobName), buildNumber, updatedBuild.getDescription(), getCrumb()));
+    }
   }
 
   @Override
   public JobConfig getJobConfig(String jobName) {
-    return jenkinsClient.getJobConfig(encode(jobName));
+    return circuitBreaker.executeSupplier(() -> jenkinsClient.getJobConfig(encode(jobName)));
   }
 
   @Override
@@ -314,14 +332,16 @@ public class JenkinsService implements BuildOperations, BuildProperties {
           try {
             return jenkinsClient.getPropertyFile(encode(jobName), buildNumber, fileName);
           } catch (RetrofitError e) {
-            // do not retry on client/deserialization error
-            if (e.getKind() == RetrofitError.Kind.CONVERSION
-                || (e.getResponse().getStatus() >= 400 && e.getResponse().getStatus() < 500)) {
-              SpinnakerException ex = new SpinnakerException(e);
-              ex.setRetryable(false);
-              throw ex;
+            // retry on network issue, 404 and 5XX
+            if (e.getKind() == RetrofitError.Kind.NETWORK
+                || (e.getKind() == RetrofitError.Kind.HTTP
+                    && (e.getResponse().getStatus() == 404
+                        || e.getResponse().getStatus() >= 500))) {
+              throw e;
             }
-            throw e;
+            SpinnakerException ex = new SpinnakerException(e);
+            ex.setRetryable(false);
+            throw ex;
           }
         },
         5,
@@ -330,18 +350,13 @@ public class JenkinsService implements BuildOperations, BuildProperties {
   }
 
   public Response stopRunningBuild(String jobName, Integer buildNumber) {
-    return jenkinsClient.stopRunningBuild(encode(jobName), buildNumber, "", getCrumb());
+    return circuitBreaker.executeSupplier(
+        () -> jenkinsClient.stopRunningBuild(encode(jobName), buildNumber, "", getCrumb()));
   }
 
   public Response stopQueuedBuild(String queuedBuild) {
-    return jenkinsClient.stopQueuedBuild(queuedBuild, "", getCrumb());
-  }
-
-  /**
-   * A CommandKey should be unique per group (to ensure broken circuits do not span Jenkins masters)
-   */
-  private String buildCommandKey(String id) {
-    return groupKey + "-" + id;
+    return circuitBreaker.executeSupplier(
+        () -> jenkinsClient.stopQueuedBuild(queuedBuild, "", getCrumb()));
   }
 
   @Override

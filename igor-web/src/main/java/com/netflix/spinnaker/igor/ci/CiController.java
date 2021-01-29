@@ -18,10 +18,12 @@ package com.netflix.spinnaker.igor.ci;
 
 import com.netflix.spinnaker.igor.build.model.GenericBuild;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -40,10 +42,17 @@ public class CiController {
 
   @GetMapping("/builds")
   public List<GenericBuild> getBuilds(
-      @RequestParam(value = "projectKey") String projectKey,
-      @RequestParam(value = "repoSlug") String repoSlug,
+      @RequestParam(value = "projectKey", required = false) String projectKey,
+      @RequestParam(value = "repoSlug", required = false) String repoSlug,
+      @RequestParam(value = "buildNumber", required = false) String buildNumber,
+      @RequestParam(value = "commitId", required = false) String commitId,
       @RequestParam(value = "completionStatus", required = false) String completionStatus) {
-    return getCiService().getBuilds(projectKey, repoSlug, completionStatus);
+    return getCiService().getBuilds(projectKey, repoSlug, buildNumber, commitId, completionStatus);
+  }
+
+  @GetMapping("/builds/{buildId}/output")
+  public Map<String, Object> getBuildOutput(@PathVariable(value = "buildId") String buildId) {
+    return getCiService().getBuildOutput(buildId);
   }
 
   private CiBuildService getCiService() {

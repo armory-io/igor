@@ -15,16 +15,15 @@ import com.netflix.spinnaker.igor.config.WerckerProperties
 import com.netflix.spinnaker.igor.config.WerckerProperties.WerckerHost
 import com.netflix.spinnaker.igor.history.EchoService
 import com.netflix.spinnaker.igor.model.BuildServiceProvider
+import com.netflix.spinnaker.igor.polling.PollContext
 import com.netflix.spinnaker.igor.service.BuildServices
 import com.netflix.spinnaker.igor.wercker.model.Application
 import com.netflix.spinnaker.igor.wercker.model.Owner
 import com.netflix.spinnaker.igor.wercker.model.Pipeline
 import com.netflix.spinnaker.igor.wercker.model.Run
-import com.netflix.spinnaker.kork.eureka.RemoteStatusChangedEvent
-
-import java.util.concurrent.TimeUnit
-
-import rx.schedulers.TestScheduler
+import com.netflix.spinnaker.kork.discovery.DiscoveryStatusListener
+import com.netflix.spinnaker.kork.dynamicconfig.DynamicConfigService
+import org.springframework.scheduling.TaskScheduler
 import spock.lang.Specification
 
 class WerckerBuildMonitorSpec extends Specification {
@@ -44,12 +43,9 @@ class WerckerBuildMonitorSpec extends Specification {
                 new WerckerHost(name: master, address: werckerDev), cache, client, Permissions.EMPTY)
     }
 
-    final MASTER = 'MASTER'
-    final pipeline = 'myOrg/myApp/pollingTest'
-    final TestScheduler scheduler = new TestScheduler()
+    def MASTER = 'MASTER'
 
     BuildServices mockBuildServices() {
-        cache.getJobNames(MASTER) >> ['pipeline']
         BuildServices buildServices = new BuildServices()
         buildServices.addServices([MASTER: mockService])
         return buildServices
@@ -66,20 +62,15 @@ class WerckerBuildMonitorSpec extends Specification {
             new Run(id:"init", startedAt: new Date(now-12)),
         ]
         monitor = monitor(buildServices)
-        monitor.worker = scheduler.createWorker()
         mockService.getRunsSince(_) >> [pipeline: runs1]
         cache.getBuildNumber(*_) >> 1
         mockService.getBuildServiceProvider() >> BuildServiceProvider.WERCKER
 
         when:
-        monitor.onApplicationEvent(Mock(RemoteStatusChangedEvent))
-        scheduler.advanceTimeBy(1L, TimeUnit.SECONDS.MILLISECONDS)
+        monitor.pollSingle(new PollContext(MASTER))
 
         then: 'initial poll'
         0 * echoService.postEvent(_)
-
-        cleanup:
-        monitor.stop()
     }
 
     void 'initial poll with completed runs'() {
@@ -93,45 +84,32 @@ class WerckerBuildMonitorSpec extends Specification {
             new Run(id:"init", startedAt: new Date(now-12), finishedAt: new Date(now-10)),
         ]
         monitor = monitor(buildServices)
-        monitor.worker = scheduler.createWorker()
         mockService.getRunsSince(_) >> [pipeline: runs1]
         cache.getBuildNumber(*_) >> 1
         mockService.getBuildServiceProvider() >> BuildServiceProvider.WERCKER
 
         when:
-        monitor.onApplicationEvent(Mock(RemoteStatusChangedEvent))
-        scheduler.advanceTimeBy(1L, TimeUnit.SECONDS.MILLISECONDS)
+        monitor.pollSingle(new PollContext(MASTER))
 
         then: 'initial poll'
         1 * echoService.postEvent(_)
-
-        cleanup:
-        monitor.stop()
     }
 
     void 'select latest one from multiple completed runs'() {
         given:
         BuildServices buildServices = mockBuildServices()
         monitor = monitor(buildServices)
-        monitor.worker = scheduler.createWorker()
-        mockService.getRunsSince(_) >> [:]
         cache.getBuildNumber(*_) >> 1
         mockService.getBuildServiceProvider() >> BuildServiceProvider.WERCKER
 
         when:
-        monitor.onApplicationEvent(Mock(RemoteStatusChangedEvent))
-        scheduler.advanceTimeBy(1L, TimeUnit.SECONDS.MILLISECONDS)
+        monitor.pollSingle(new PollContext(MASTER))
 
         then: 'initial poll'
         0 * echoService.postEvent(_)
+        1 * mockService.getRunsSince(_) >> [:]
 
-        when:
-        scheduler.advanceTimeBy(998L, TimeUnit.SECONDS.MILLISECONDS)
-
-        then:
-        0 * mockService.getRunsSince(_) >> [:]
-
-        when: 'poll at 1 second'
+        when: 'next poll'
         long now = System.currentTimeMillis();
         List<Run> runs1 = [
             new Run(id:"b",    startedAt: new Date(now-10)),
@@ -139,16 +117,13 @@ class WerckerBuildMonitorSpec extends Specification {
             new Run(id:"init", startedAt: new Date(now-12), finishedAt: new Date(now-8)),
         ]
         cache.getLastPollCycleTimestamp(_, _) >> (now - 1000)
-        mockService.getRunsSince(_) >> [pipeline: runs1]
+        1 * mockService.getRunsSince(_) >> [pipeline: runs1]
         cache.getBuildNumber(*_) >> 1
-        scheduler.advanceTimeBy(2L, TimeUnit.SECONDS.MILLISECONDS)
+        monitor.pollSingle(new PollContext(MASTER))
 
         then:
         1 * cache.setEventPosted('MASTER', 'pipeline', 'init')
         1 * echoService.postEvent(_)
-
-        cleanup:
-        monitor.stop()
     }
 
     void 'get runs of multiple pipelines'() {
@@ -156,25 +131,23 @@ class WerckerBuildMonitorSpec extends Specification {
         BuildServices buildServices = new BuildServices()
         buildServices.addServices([MASTER: werckerService])
         monitor = monitor(buildServices)
-        monitor.worker = scheduler.createWorker()
         cache.getBuildNumber(*_) >> 1
         client.getRunsSince(_, _, _, _, _) >> []
         mockService.getBuildServiceProvider() >> BuildServiceProvider.WERCKER
 
         when:
-        monitor.onApplicationEvent(Mock(RemoteStatusChangedEvent))
-        scheduler.advanceTimeBy(1L, TimeUnit.SECONDS.MILLISECONDS)
+        monitor.pollSingle(new PollContext(MASTER))
 
         then: 'initial poll'
         0 * echoService.postEvent(_)
 
         when:
-        scheduler.advanceTimeBy(998L, TimeUnit.SECONDS.MILLISECONDS)
+        monitor.pollSingle(new PollContext(MASTER))
 
         then:
         0 * echoService.postEvent(_)
 
-        when: 'poll at 1 second'
+        when: 'next poll'
         long now = System.currentTimeMillis();
         def org = 'myOrg'
         def apps = [
@@ -199,7 +172,7 @@ class WerckerBuildMonitorSpec extends Specification {
         client.getRunsSince(_,_,_,_,_) >> runs1
         cache.getLastPollCycleTimestamp(_, _) >> (now - 1000)
         cache.getBuildNumber(*_) >> 1
-        scheduler.advanceTimeBy(2L, TimeUnit.SECONDS.MILLISECONDS)
+        monitor.pollSingle(new PollContext(MASTER))
 
         then:
         1 * cache.setEventPosted('MASTER', 'myOrg/app0/p00', 'run0')
@@ -208,9 +181,6 @@ class WerckerBuildMonitorSpec extends Specification {
         1 * cache.setEventPosted('MASTER', 'myOrg/app2/p20', 'run4')
         0 * cache.setEventPosted('MASTER', 'myOrg/app3/p30', 'run5')
         4 * echoService.postEvent(_)
-
-        cleanup:
-        monitor.stop()
     }
 
     WerckerBuildMonitor monitor(BuildServices buildServices) {
@@ -219,14 +189,16 @@ class WerckerBuildMonitorSpec extends Specification {
         return new WerckerBuildMonitor(
                 cfg,
                 new NoopRegistry(),
-                Optional.empty(),
+                new DynamicConfigService.NoopDynamicConfig(),
+                new DiscoveryStatusListener(true),
                 Optional.empty(),
                 cache,
                 buildServices,
                 true,
                 Optional.of(echoService),
-                new WerckerProperties()
-                )
+                new WerckerProperties(),
+                Mock(TaskScheduler)
+        )
     }
 
     Application appOf(String name, String owner, List<Pipeline> pipelines) {

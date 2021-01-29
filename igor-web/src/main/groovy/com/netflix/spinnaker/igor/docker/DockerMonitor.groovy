@@ -16,7 +16,6 @@
 
 package com.netflix.spinnaker.igor.docker
 
-import com.netflix.discovery.DiscoveryClient
 import com.netflix.spectator.api.BasicTag
 import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.igor.IgorConfigurationProperties
@@ -33,9 +32,12 @@ import com.netflix.spinnaker.igor.polling.LockService
 import com.netflix.spinnaker.igor.polling.PollContext
 import com.netflix.spinnaker.igor.polling.PollingDelta
 import com.netflix.spinnaker.kork.artifacts.model.Artifact
+import com.netflix.spinnaker.kork.discovery.DiscoveryStatusListener
+import com.netflix.spinnaker.kork.dynamicconfig.DynamicConfigService
 import com.netflix.spinnaker.security.AuthenticatedRequest
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import org.springframework.scheduling.TaskScheduler
 import org.springframework.stereotype.Service
 
 import java.util.concurrent.TimeUnit
@@ -51,35 +53,30 @@ class DockerMonitor extends CommonPollingMonitor<ImageDelta, DockerPollingDelta>
     private final DockerRegistryAccounts dockerRegistryAccounts
     private final Optional<EchoService> echoService
     private final Optional<KeelService> keelService
-    private final Optional<DockerRegistryCacheV2KeysMigration> keysMigration
     private final DockerRegistryProperties dockerRegistryProperties
 
     @Autowired
     DockerMonitor(IgorConfigurationProperties properties,
                   Registry registry,
-                  Optional<DiscoveryClient> discoveryClient,
-                  Optional<LockService> lockService,
+                  DynamicConfigService dynamicConfigService,
+                  DiscoveryStatusListener discoveryStatusListener,
+                  Optional < LockService > lockService,
                   DockerRegistryCache cache,
                   DockerRegistryAccounts dockerRegistryAccounts,
                   Optional<EchoService> echoService,
                   Optional<KeelService> keelService,
-                  Optional<DockerRegistryCacheV2KeysMigration> keysMigration,
-                  DockerRegistryProperties dockerRegistryProperties) {
-        super(properties, registry, discoveryClient, lockService)
+                  DockerRegistryProperties dockerRegistryProperties,
+                  TaskScheduler scheduler) {
+        super(properties, registry, dynamicConfigService, discoveryStatusListener, lockService, scheduler)
         this.cache = cache
         this.dockerRegistryAccounts = dockerRegistryAccounts
         this.echoService = echoService
-        this.keysMigration = keysMigration
         this.dockerRegistryProperties = dockerRegistryProperties
         this.keelService = keelService
     }
 
     @Override
     void poll(boolean sendEvents) {
-        if (keysMigration.isPresent() && keysMigration.get().running) {
-            log.warn("Skipping poll cycle: Keys migration is in progress")
-            return
-        }
         dockerRegistryAccounts.updateAccounts()
         dockerRegistryAccounts.accounts.forEach({ account ->
             pollSingle(new PollContext((String) account.name, account, !sendEvents))
@@ -104,7 +101,12 @@ class DockerMonitor extends CommonPollingMonitor<ImageDelta, DockerPollingDelta>
         Set<String> cachedImages = cache.getImages(account)
 
         long startTime = System.currentTimeMillis()
-        List<TaggedImage> images = AuthenticatedRequest.allowAnonymous { dockerRegistryAccounts.service.getImagesByAccount(account) }
+        //Netflix is adding `includeDetails` flag to `getImagesByAccount`, in order to get a detailed response from the resgistry
+        List<TaggedImage> images = AuthenticatedRequest.allowAnonymous { dockerRegistryAccounts.service.getImagesByAccount(account, true) }
+
+        long endTime = System.currentTimeMillis()
+        log.debug("Executed generateDelta:DockerMonitor with includeData=true in {}ms", endTime - startTime);
+
         registry.timer("pollingMonitor.docker.retrieveImagesByAccount", [new BasicTag("account", account)])
             .record(System.currentTimeMillis() - startTime, TimeUnit.MILLISECONDS)
 
@@ -117,7 +119,7 @@ class DockerMonitor extends CommonPollingMonitor<ImageDelta, DockerPollingDelta>
             }
         }
 
-        log.info("Found {} new images for {}", delta.size(), account)
+        log.info("Found {} new images for {}. Images: {}", delta.size(), account, delta.collect {[imageId: it.imageId, sendEvent: it.sendEvent] })
 
         return new DockerPollingDelta(items: delta, cachedImages: cachedImages)
     }
@@ -157,7 +159,11 @@ class DockerMonitor extends CommonPollingMonitor<ImageDelta, DockerPollingDelta>
                 if (sendEvents && item.sendEvent) {
                     postEvent(delta.cachedImages, item.image, item.imageId)
                 } else {
-                    registry.counter(missedNotificationId.withTags("monitor", getClass().simpleName, "reason", "fastForward")).increment()
+                  if (!sendEvents) {
+                    registry.counter(missedNotificationId.withTags("monitor", getName(), "reason", "fastForward")).increment()
+                  } else {
+                    registry.counter(missedNotificationId.withTags("monitor", getName(), "reason", "skippedDueToEmptyCache")).increment()
+                  }
                 }
             }
         }
@@ -171,7 +177,7 @@ class DockerMonitor extends CommonPollingMonitor<ImageDelta, DockerPollingDelta>
     void postEvent(Set<String> cachedImagesForAccount, TaggedImage image, String imageId) {
         if (!echoService.isPresent()) {
             log.warn("Cannot send tagged image notification: Echo is not enabled")
-            registry.counter(missedNotificationId.withTags("monitor", getClass().simpleName, "reason", "echoDisabled")).increment()
+            registry.counter(missedNotificationId.withTags("monitor", getName(), "reason", "echoDisabled")).increment()
             return
         }
         if (!cachedImagesForAccount) {
@@ -195,6 +201,17 @@ class DockerMonitor extends CommonPollingMonitor<ImageDelta, DockerPollingDelta>
 
         if (keelService.isPresent()) {
           String imageReference = image.repository + ":" + image.tag
+          Map <String, String> metadata = [fullname: imageReference, registry: image.account, tag: image.tag]
+          Optional.ofNullable(image.buildNumber)
+            .ifPresent({ buildNumber -> metadata.put("buildNumber", buildNumber.toString()) })
+          Optional.ofNullable(image.commitId)
+            .ifPresent({ commitId -> metadata.put("commitId", commitId.toString()) })
+          Optional.ofNullable(image.date)
+            .ifPresent({ date -> metadata.put("date", date.toString()) })
+          Optional.ofNullable(image.branch)
+            .ifPresent({ branch -> metadata.put("branch", branch.toString()) })
+
+
           Artifact artifact = Artifact.builder()
             .type("DOCKER")
             .customKind(false)
@@ -202,7 +219,7 @@ class DockerMonitor extends CommonPollingMonitor<ImageDelta, DockerPollingDelta>
             .version(image.tag)
             .location(image.account)
             .reference(imageId)
-            .metadata([fullname: imageReference, registry: image.account, tag: image.tag],)
+            .metadata(metadata)
             .provenance(image.registry)
             .build()
 
