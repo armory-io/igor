@@ -18,6 +18,22 @@ plugins {
   id 'io.spinnaker.project' version "$spinnakerGradleVersion" apply false
 }
 
+plugins {
+  id 'jacoco'
+  id 'com.github.kt3k.coveralls' version '2.8.4'
+}
+
+allprojects {
+  repositories {
+    jcenter()
+  }
+}
+
+subprojects {
+  apply plugin: 'jacoco'
+  apply plugin: 'com.github.kt3k.coveralls'
+}
+
 subprojects {
   group = "com.netflix.spinnaker.igor"
   apply plugin: 'io.spinnaker.project'
@@ -82,3 +98,40 @@ subprojects {
 }
 
 defaultTasks 'run'
+
+def jacocoProjects = subprojects.findAll { it.path != ':igor-bom' }
+task jacocoMerge(type: JacocoMerge) {
+  jacocoProjects.each { subproject ->
+    executionData subproject.tasks.withType(Test)
+  }
+  doFirst {
+    executionData = files(executionData.findAll { it.exists() })
+  }
+}
+
+task jacocoRootReport(type: JacocoReport, group: 'Coverage reports') {
+  description = 'Generates an aggregate report from all subprojects'
+  dependsOn jacocoProjects.test, jacocoMerge
+
+  getSourceDirectories().setFrom(jacocoProjects.sourceSets.main.allSource.srcDirs)
+  getClassDirectories().setFrom(jacocoProjects.sourceSets.main.output)
+
+  executionData jacocoMerge.destinationFile
+
+  reports {
+    html.enabled = true // human readable
+    xml.enabled = true // required by coveralls
+  }
+}
+
+coveralls {
+  sourceDirs = jacocoProjects.sourceSets.main.allSource.srcDirs.flatten()
+  jacocoReportPath = "${buildDir}/reports/jacoco/jacocoRootReport/jacocoRootReport.xml"
+}
+
+tasks.coveralls {
+  group = 'Coverage reports'
+  description = 'Uploads the aggregated coverage report to Coveralls'
+
+  dependsOn jacocoRootReport
+}
