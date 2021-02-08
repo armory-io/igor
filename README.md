@@ -1,3 +1,5 @@
+[![Coverage Status](https://coveralls.io/repos/github/armory-io/igor/badge.svg?branch=master)](https://coveralls.io/github/armory-io/igor?branch=master)
+
 [![Build Status](https://api.travis-ci.org/spinnaker/igor.svg?branch=master)](https://travis-ci.org/spinnaker/igor)
 
 [![](https://github.com/spinnaker/igor/workflows/Igor%20CI/badge.svg)](https://github.com/spinnaker/igor/actions?query=workflow%3A%22Igor+CI%22+branch%3Amaster)
