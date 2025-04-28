@@ -35,8 +35,8 @@ import retrofit.RestAdapter
 import retrofit.converter.JacksonConverter
 
 @Configuration
-@ConditionalOnProperty(['services.clouddriver.base-url', 'docker-registry.enabled'])
-@EnableConfigurationProperties(DockerRegistryProperties)
+@ConditionalOnProperty(['services.clouddriver.base-url', 'docker-registry.enabled', 'helm-oci-docker-registry.enabled'])
+@EnableConfigurationProperties([DockerRegistryProperties, HelmOciDockerRegistryProperties])
 @CompileStatic
 class DockerRegistryConfig {
     @Bean
